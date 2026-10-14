@@ -1,0 +1,32 @@
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <cstdlib>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using namespace std;
+
+struct User { int id; string name,email,password; };
+struct Item { int id; string owner,name,category,description,condition,status,borrower; };
+struct Request { int id,itemId; string itemName,owner,borrower,status; };
+User users[100]; Item items[200]; Request requests[300];
+int userCount=0,itemCount=0,requestCount=0;
+
+string decode(const string&s){string r;for(size_t i=0;i<s.size();i++){if(s[i]=='+')r+=' ';else if(s[i]=='%'&&i+2<s.size()){r+=(char)strtol(s.substr(i+1,2).c_str(),0,16);i+=2;}else r+=s[i];}return r;}
+string val(const string&b,const string&k){string q=k+"=";size_t p=b.find(q);if(p==string::npos)return"";p+=q.size();size_t e=b.find('&',p);return decode(e==string::npos?b.substr(p):b.substr(p,e-p));}
+string esc(const string&s){string r;for(char c:s){if(c=='\\')r+="\\\\";else if(c=='"')r+="\\\"";else if(c=='\n')r+="\\n";else r+=c;}return r;}
+string type(const string&p){if(p.find(".html")!=string::npos)return"text/html; charset=UTF-8";if(p.find(".css")!=string::npos)return"text/css; charset=UTF-8";if(p.find(".js")!=string::npos)return"application/javascript; charset=UTF-8";return"text/plain";}
+void sendOK(SOCKET c,const string&x,const string&t="text/html; charset=UTF-8"){string r="HTTP/1.1 200 OK\r\nContent-Type: "+t+"\r\nContent-Length: "+to_string(x.size())+"\r\nConnection: close\r\n\r\n"+x;send(c,r.c_str(),(int)r.size(),0);}
+void notFound(SOCKET c){sendOK(c,"<h1>404 - Page Not Found</h1>");}
+void registerUser(SOCKET c,const string&b){string n=val(b,"name"),e=val(b,"email"),p=val(b,"password");if(n.empty()||e.empty()||p.empty()){sendOK(c,"Please fill all fields.","text/plain");return;}for(int i=0;i<userCount;i++)if(users[i].email==e){sendOK(c,"Email already registered.","text/plain");return;}users[userCount]={userCount+1,n,e,p};userCount++;sendOK(c,"Registration successful!","text/plain");}
+void login(SOCKET c,const string&b){string e=val(b,"email"),p=val(b,"password");for(int i=0;i<userCount;i++)if(users[i].email==e&&users[i].password==p){sendOK(c,users[i].name+"|"+e,"text/plain");return;}sendOK(c,"Invalid email or password","text/plain");}
+void addItem(SOCKET c,const string&b){string o=val(b,"ownerEmail"),n=val(b,"name"),cat=val(b,"category"),d=val(b,"description"),co=val(b,"condition");if(o.empty()||n.empty()||cat.empty()||d.empty()||co.empty()){sendOK(c,"Please fill all item fields.","text/plain");return;}items[itemCount]={itemCount+1,o,n,cat,d,co,"Available",""};itemCount++;sendOK(c,"Item added successfully!","text/plain");}
+void listItems(SOCKET c){string j="[";for(int i=0;i<itemCount;i++){if(i)j+=",";j+="{\"id\":"+to_string(items[i].id)+",\"owner\":\""+esc(items[i].owner)+"\",\"name\":\""+esc(items[i].name)+"\",\"category\":\""+esc(items[i].category)+"\",\"description\":\""+esc(items[i].description)+"\",\"condition\":\""+esc(items[i].condition)+"\",\"status\":\""+items[i].status+"\"}";}j+="]";sendOK(c,j,"application/json");}
+void borrow(SOCKET c,const string&b){int id=atoi(val(b,"itemId").c_str());string u=val(b,"borrowerEmail");for(int i=0;i<itemCount;i++)if(items[i].id==id){if(items[i].status!="Available"){sendOK(c,"Item is not available.","text/plain");return;}if(items[i].owner==u){sendOK(c,"You cannot borrow your own item.","text/plain");return;}requests[requestCount]={requestCount+1,id,items[i].name,items[i].owner,u,"Pending"};requestCount++;sendOK(c,"Borrow request sent!","text/plain");return;}sendOK(c,"Item not found.","text/plain");}
+void reqs(SOCKET c,const string&email){string j="[";bool first=true;for(int i=0;i<requestCount;i++)if(requests[i].owner==email||requests[i].borrower==email){if(!first)j+=",";first=false;j+="{\"id\":"+to_string(requests[i].id)+",\"itemId\":"+to_string(requests[i].itemId)+",\"itemName\":\""+esc(requests[i].itemName)+"\",\"owner\":\""+esc(requests[i].owner)+"\",\"borrower\":\""+esc(requests[i].borrower)+"\",\"status\":\""+requests[i].status+"\"}";}j+="]";sendOK(c,j,"application/json");}
+void approve(SOCKET c,const string&b){int id=atoi(val(b,"requestId").c_str());string owner=val(b,"ownerEmail");for(int i=0;i<requestCount;i++)if(requests[i].id==id&&requests[i].owner==owner&&requests[i].status=="Pending")for(int k=0;k<itemCount;k++)if(items[k].id==requests[i].itemId&&items[k].status=="Available"){items[k].status="Borrowed";items[k].borrower=requests[i].borrower;requests[i].status="Approved";sendOK(c,"Request approved!","text/plain");return;}sendOK(c,"Unable to approve request.","text/plain");}
+void ret(SOCKET c,const string&b){int id=atoi(val(b,"itemId").c_str());string u=val(b,"borrowerEmail");for(int i=0;i<itemCount;i++)if(items[i].id==id&&items[i].borrower==u&&items[i].status=="Borrowed"){items[i].status="Available";items[i].borrower="";for(int k=0;k<requestCount;k++)if(requests[k].itemId==id&&requests[k].borrower==u&&requests[k].status=="Approved")requests[k].status="Returned";sendOK(c,"Item returned successfully!","text/plain");return;}sendOK(c,"Return failed.","text/plain");}
+void file(SOCKET c,string path){if(path=="/")path="/index.html";if(path.find("..")!=string::npos){notFound(c);return;}ifstream f(("public"+path).c_str(),ios::binary);if(!f){notFound(c);return;}stringstream s;s<<f.rdbuf();sendOK(c,s.str(),type(path));}
+string body(const string&r){size_t p=r.find("\r\n\r\n");return p==string::npos?"":r.substr(p+4);}
+int main(){WSADATA w;if(WSAStartup(MAKEWORD(2,2),&w)!=0)return 1;SOCKET s=socket(AF_INET,SOCK_STREAM,0);sockaddr_in a;a.sin_family=AF_INET;a.sin_addr.s_addr=INADDR_ANY;a.sin_port=htons(8081);if(bind(s,(sockaddr*)&a,sizeof(a))==SOCKET_ERROR){cout<<"Port 8081 is busy.\n";return 1;}listen(s,10);cout<<"Borrow & Return running at http://localhost:8081\n";while(true){SOCKET c=accept(s,0,0);if(c==INVALID_SOCKET)continue;char b[8192];int n=recv(c,b,sizeof(b)-1,0);if(n<=0){closesocket(c);continue;}b[n]=0;string r=b;size_t p1=r.find(' '),p2=r.find(' ',p1+1);if(p1==string::npos||p2==string::npos){closesocket(c);continue;}string path=r.substr(p1+1,p2-p1-1);if(r.find("POST ")==0){string bdy=body(r);if(path=="/register")registerUser(c,bdy);else if(path=="/login")login(c,bdy);else if(path=="/add-item")addItem(c,bdy);else if(path=="/borrow")borrow(c,bdy);else if(path=="/requests")reqs(c,val(bdy,"email"));else if(path=="/approve")approve(c,bdy);else if(path=="/return")ret(c,bdy);else notFound(c);}else if(path=="/api/items")listItems(c);else file(c,path);closesocket(c);}closesocket(s);WSACleanup();}
